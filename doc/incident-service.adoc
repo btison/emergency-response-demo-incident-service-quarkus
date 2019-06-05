@@ -1,0 +1,860 @@
+:scrollbar:
+:data-uri:
+:toc2:
+
+== Emergency Response Demo: Implementing the Incident Service With Quarkus
+
+=== Incident Service Scope And Functionality
+
+The _Incident Service_ is one of the micro-services within the Emergency Response Demo project. Its main scope is the management of Incident entities. An Incident models a request for help. Incident entities are persisted in a relational database. +
+The state of the Incident (Reported, Assigned, PickedUp, Rescued) is updated when the Incident is assigned to a Mission and whenever the Mission progresses through its lifecycle.
+
+The Incident Service application consists of the following functional layers:
+
+* REST API: exposes the following operations:
+** GET /incidents: retrieves all Incidents.
+** POST /incidents: create an Incident.
+** GET /incidents/{id}: retrieves an Incident by id.
+** GET /incidents/{status}: retrieves Incidents by status.
+** GET /incidents/byname/{name}: retrieves Incidents by reporter name.
+** POST /reset: deletes all Incidents from the database.
+* DAO layer: responsible for CRUD operations of Incident entities in the database.
+* Kafka Consumer: consumes _IncidentUpdateCommand_ messages from a Kafka topic. The Incident entity is updated accordingly.
+* Kafka producer: when a Incident entity is created, an _IncidentReportedEvent_ message is sent to a Kafka topic.
+* Service layer: implementation of the business logic, transaction management.
+
+=== Incident Service: Spring Boot Implementation
+
+The original version of the Incident Service is developed using Spring Boot, version 2.1.3.RELEASE.
+
+Code walkthrough:
+
+* `com.redhat.cajun.navy.incident.Application` class: main Spring Boot class, annotated with `@SpringBootApplication` annotation.
+* `com.redhat.cajun.navy.incident.KafkaConfiguration` class: Kafka configuration Bean, annotated with `@Configuration` and `@EnableKafka` annotations. Defines and configures a `KafkaProducerFactory`, `KafkaConsumerFactory`, `KafkaTemplate` and `KafkaListenerContainerFactory` beans. These Beans are the building blocks of Spring Boot integration with Kafka.
+* `com.redhat.cajun.navy.incident.IncidentsController` class: defines the REST API for the Incident Service. Uses Spring MVC annotations. Delegates to the `IncidentService` for business logic execution.
+* `com.redhat.cajun.navy.incident.service.IncidentService` class: contains the business logic of the service. Has `IncidentDao` and `KafkaTemplate` beans injected. Methods that interact with the database through the DAO are annotated with `@Transactional` to mark transactional boundaries.
+* `com.redhat.cajun.navy.incident.entity.Incident` class: Incident entity
+* `com.redhat.cajun.navy.incident.dao.IncidentDao` class: DAO class, CRUD operations for Incident entity.
+* `com.redhat.cajun.navy.incident.message` and `com.redhat.cajun.navy.incident.model` packages: model classes for messages consumed from and sent to Kafka topics.
+* `com.redhat.cajun.navy.incident.listener.UpdateIncidentCommandListener`: consumes messages from Kafka topic. Message processing method annotated with `@KafkaListener` for automatic registration as Kafka consumer by Spring.
+* Unit and integration tests in the `src/test` directory.
+* Health check provided by Spring Boot Actuator.
+
+Application Configuration:
+
+* `src/main/resources/META-INF/persistence.xml` : JPA persistence descriptor.
+* `src/main/resources/application.properties`: static configuration
+* `application.properties` in ConfigMap: environment-specific configuration.
+
+=== Incident Service: Quarkus Implementation
+
+NOTE: This is not a migration, or natural evolution of the Spring Boot code, but rather a rewrite using Quarkus core libraries and extensions.
+
+Quarkus promotes an asynchronous, reactive style of architecture and programming. The most notable changes compared to the Spring Boot application are:
+
+* Asynchronous REST layer using JAX-RS 2.1
+* Asynchronous communication with the service layer over a Vert.x EventBus
+* Quarkus reactive messaging for consuming and producing Kafka messages.
+
+==== Prerequisites
+
+* JDK 1.8
+* Maven version >= 3.5.4
+* Docker installed and running.
+* Graal VM 1.0.0.rc16. The GRAALVM_HOME environment variable set to point to the Graal VM.
+* A working C developer environment. On Linux this means GCC, the glibc and zlib headers. On MacOS run `xcode-select --install`.
++
+NOTE: GraalVM and a C developer environment are not required if building the native executable in a Docker container.
+* `oc` OpenShift command line tool.
+
+==== Creating a Quarkus project
+
+. The easiest way to get started with a Quarkus project is running the following maven command:
++
+----
+$ mkdir incident-service-quarkus
+$ cd incident-service-quarkus
+$ mvn io.quarkus:quarkus-maven-plugin:0.16.0:create \
+    -DprojectGroupId=com.redhat.cajun.navy \
+    -DprojectArtifactId=incident-service-quarkus \
+    -DprojectVersionId=0.0.1-SNAPSHOT \
+    -DclassName="com.redhat.cajun.navy.incident.rest.IncidentsResource" \
+    -Dpath="/incidents"
+----
++
+This command creates a maven project structure with the `quarkus-resteasy` Quarkus extension. The Maven `pom.xml` contains a profile to build a native binary from the project, as well as Docker files to build a Docker image to run the native image.
+
+. Import the project into your IDE of choice (Red Hat CodeReady Studio, VSCode, IntelliJ).
+
+. Remove the `com.redhat.cajun.navy.incident.rest` package in the `src/main/test` directory.
+
+. Remove the `index.html` file from the `src/main/resources/META-INF/resources` directory.
+
+==== REST API
+
+In this section you will develop the REST API for the Incident Service using the asynchronous JAX-RS 2.1 REST API. The implementation will communicate asynchronously with the service layer using the Vert.x EventBus.
+
+. In the `IncidentsResource` class, remove the generated `hello` method.
+. Implement the REST endpoint to retrieve all the Incidents.
+** Create a method `incidents()`, with method `GET`, bound to the root path. The endpoint produces JSON. The method returns a `CompletionStage<Response>`:
++
+----
+    @GET
+    @Path("/")
+    @Produces(MediaType.APPLICATION_JSON)
+    public CompletionStage<Response> incidents() {
+        return null;
+    }
+----
+** In the project `pom.xml` file, add a dependency to the `quarkus-vertx` extension.
++
+----
+  <dependencies>
+    [...]
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-vertx</artifactId>
+    </dependency>
+  </dependencies>
+----
+** In the `IncidentsResource` class, inject an instance of the Vert.x `io.vertx.axle.core.eventbus.EventBus`.
++
+----
+@Inject
+EventBus eventbus;
+----
+** Implement the method: the implementation sends a message to the `incident-service` Vert.x EventBus destination. The message payload is an empty Vert.x `JsonObject` object. The message contains a header specifying the operation that needs to be performed. The reply message contains the Incidents as a Vert.x `JsonArray`. The Array is encoded to a String and sent to the caller.
++
+----
+    @GET
+    @Path("/")
+    @Produces(MediaType.APPLICATION_JSON)
+    public CompletionStage<Response> incidents() {
+        DeliveryOptions options = new DeliveryOptions().addHeader("action", "incidents");
+        return bus.<JsonObject>send("incident-service", new JsonObject(), options)
+                .thenApply(msg -> Response.ok(msg.body().getJsonArray("incidents").encode()).build());
+    }
+----
+
+. Implement the REST endpoint to create an Incident.
+** Create a method `createIncident()`, with method `POST`, bound to the root path. The endpoint consumes JSON. The POST body payload is passed as a String to the method. The method returns a `CompletionStage<Response>`:
++
+----
+    @POST
+    @Path("/")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public CompletionStage<Response> createIncident(String incident) {
+        return null;
+    }
+----
+** Implement the method: the implementation sends a message to the `incident-service` Vert.x EventBus destination. The message payload is a `JsonObject` object containing the payload. The message contains a header specifying the operation that needs to be performed. The reply message is empty. Upon receiving the reply message, an empty response with Http status code 200 is sent to the caller.
++
+----
+    @POST
+    @Path("/")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public CompletionStage<Response> createIncident(String incident) {
+        DeliveryOptions options = new DeliveryOptions().addHeader("action", "createIncident");
+        return bus.<JsonObject>send("incident-service", new JsonObject(incident), options)
+                .thenApply(msg -> Response.ok().build());
+    }
+----
+
+. Implement the other REST API methods:
++
+----
+    @GET
+    @Path("/{status}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public CompletionStage<Response> incidentsByStatus(@PathParam("status") String status) {
+        DeliveryOptions options = new DeliveryOptions().addHeader("action", "incidentsByStatus");
+        return bus.<JsonObject>send("incident-service", new JsonObject().put("status", status), options)
+                .thenApply(msg -> Response.ok(msg.body().getJsonArray("incidents").encode()).build());
+    }
+
+    @GET
+    @Path("/incident/{id}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public CompletionStage<Response> incidentById(@PathParam("id") String incidentId) {
+        DeliveryOptions options = new DeliveryOptions().addHeader("action", "incidentById");
+        return bus.<JsonObject>send("incident-service",  new JsonObject().put("incidentId", incidentId), options)
+                .thenApply(msg -> {
+                    JsonObject incident = msg.body().getJsonObject("incident");
+                    if (incident == null) {
+                        return Response.status(404).build();
+                    } else {
+                        return Response.ok(incident.encode()).build();
+                    }
+                });
+    }
+
+    @GET
+    @Path("/byname/{name}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public CompletionStage<Response> incidentsByName(@PathParam("name") String name) {
+        DeliveryOptions options = new DeliveryOptions().addHeader("action", "incidentsByName");
+        return bus.<JsonObject>send("incident-service", new JsonObject().put("name", name), options)
+                .thenApply(msg -> Response.ok(msg.body().getJsonArray("incidents").encode()).build());
+    }
+
+    @POST
+    @Path("/reset")
+    public CompletionStage<Response> reset() {
+        DeliveryOptions options = new DeliveryOptions().addHeader("action", "incidentsByName");
+        return bus.<JsonObject>send("incident-service", new JsonObject(), options)
+                .thenApply(msg -> Response.ok().build());
+    }
+----
+
+==== Model
+
+The model classes in the `com.redhat.cajun.navy.incident.message` and `com.redhat.cajun.navy.incident.model` packages don't require a lot of changes.
+
+. Copy the `com.redhat.cajun.navy.incident.message` and `com.redhat.cajun.navy.incident.model` from the Spring Boot implementation to the project.
+. When building a native executable, GraalVM operates with a closed world assumption, and as such reflection targets need to be explicitly declared. In Quarkus, this can be done by annotating classes that will be used reflectively with the `@RegisterForReflection` annotation. This will for instance be the case for domain classes that will be used with libraries like _JSON-B_.
+** Annotate the `IncidentReportedEvent`, `Message` and `Incident` classes with the `@RegisterForReflection` annotation.
+** Add setters for all the fields in the `Incident` class.
+. In a native executable, a class like `Message` with a generic field (`body`) cannot be created through reflection with _JSON-B_. An adapter class is required to help the JSON-B framework to correctly unmarshall JSON into an instance of `Message<UpdateIncidentCommand>`.
+** In the `pom.xml` file of the project, add a dependency to the `quarkus-jsonb` extension:
++
+----
+  <dependencies>
+    [...]
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-jsonb</artifactId>
+    </dependency>
+  </dependencies>
+----
+** Add a inner static builder class to `UpdateIncidentCommand`:
++
+----
+public class UpdateIncidentCommand {
+
+    private Incident incident;
+
+    public Incident getIncident() {
+        return incident;
+    }
+
+    public static class Builder {
+
+        private final UpdateIncidentCommand command;
+
+        public Builder(Incident incident) {
+            command = new UpdateIncidentCommand();
+            command.incident = incident;
+        }
+
+        public UpdateIncidentCommand build() {
+            return command;
+        }
+
+    }
+}
+----
+** Create a JSON-B adapter class for `Message<UpdateIncidentCommand>` in the `com.redhat.cajun.navy.incident.message` package:
++
+----
+public class UpdateIncidentCommandMessageAdapter implements JsonbAdapter<Message, JsonObject> {
+
+    @Override
+    public JsonObject adaptToJson(Message obj) throws Exception {
+        return null;
+    }
+
+    @Override
+    public Message<UpdateIncidentCommand> adaptFromJson(JsonObject adapted) throws Exception {
+        JsonObject bodyJson = adapted.getJsonObject("body");
+        JsonObject incidentJson = bodyJson.getJsonObject("incident");
+        Incident incident = new Incident.Builder(incidentJson.getString("id"))
+                .lat(incidentJson.containsKey("lat") ? incidentJson.getString("lat") : null)
+                .lon(incidentJson.containsKey("lon") ? incidentJson.getString("lon") : null)
+                .medicalNeeded(incidentJson.containsKey("medicalNeeded") ? incidentJson.getBoolean("medicalNeeded") : null)
+                .numberOfPeople(incidentJson.containsKey("numberOfPeople") ? incidentJson.getInt("numberOfPeople") : null)
+                .victimName(incidentJson.containsKey("victimName") ? incidentJson.getString("victimName") : null)
+                .victimPhoneNumber(incidentJson.containsKey("victimPhoneNumber") ? incidentJson.getString("victimPhoneNumber") : null)
+                .status(incidentJson.containsKey("status") ? incidentJson.getString("status") : null)
+                .build();
+        UpdateIncidentCommand command = new UpdateIncidentCommand.Builder(incident).build();
+        return new Message.Builder<>(adapted.getString("messageType"), adapted.getString("invokingService"), command)
+                .id(adapted.getString("id")).timestamp(adapted.getJsonNumber("timestamp").longValue()).build();
+    }
+}
+----
+
+==== Persistence Layer
+
+. To use JPA in a Quarkus application with PostgreSQL, the following dependencies need to be added to the `pom.xml` file: `quarkus-agroal`, `quarkus-hibernate-orm`, `quarkus-jdbc-postgres`.
++
+----
+  <dependencies>
+    [...]
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-agroal</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-hibernate-orm</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-jdbc-postgresql</artifactId>
+    </dependency>
+  </dependencies>
+----
+. Copy the `com.redhat.cajun.navy.incident.dao` and `com.redhat.cajun.navy.incident.entity` packages from the Spring Boot implementation to the project.
+. In the `IncidentDao` class:
+** Replace the `@Component` class level annotation with the CDI `@ApplicationScoped` annotation.
+** Replace the `@PersistenceContext` annotation on the `entityManager` field with a `@Inject` annotation.
+
+==== Service Layer
+
+. Copy the `com.redhat.cajun.navy.incident.service` package from the Spring Boot implementation to the project.
+. Make the following changes to the `IncidentService` class:
+** Replace the `@Service` class level annotation with the CDI `@ApplicationScoped` annotation.
+** Remove the injected `KafkaTemplate` field.
+** On the `IncidentDao` field, replace the `@Autowired` annotation with a CDI `@Inject` annotation.
+** Remove the `destination` field.
+** In the `create` method, remove the code to send a message to the Kafka topic.
+** Replace the `org.springframework.transaction.annotation.Transactional` annotations with `javax.transaction.Transactional` annotations.
+. In the `com.redhat.cajun.navy.incident.service` package, create a class `EventBusConsumer`. This class is responsible for consuming messages from the Vert.x EventBus, marshalling message payload,  delegating to the `IncidentService` class, and sending a reply over the EventBus.
++
+----
+@ApplicationScoped
+public class EventBusConsumer {
+
+    private static Logger log = LoggerFactory.getLogger(EventBusConsumer.class);
+
+    @Inject
+    IncidentService service;
+
+    @ConsumeEvent(value = "incident-service", blocking = true)
+    public void consume(Message<JsonObject> msg) {
+        String action = msg.headers().get("action");
+        switch (action) {
+            case "incidents" :
+                incidents(msg);
+                break;
+            case "incidentById" :
+                incidentById(msg);
+                break;
+            case "incidentsByStatus":
+                incidentsByStatus(msg);
+                break;
+            case "incidentsByName":
+                incidentsByName(msg);
+                break;
+            case "reset" :
+                reset(msg);
+                break;
+            case "createIncident":
+                createIncident(msg);
+                break;
+            default:
+                msg.fail(-1, "Unsupported operation");
+        }
+    }
+
+    private void incidents(Message<JsonObject> msg) {
+        List<Incident> incidents = service.incidents();
+        JsonArray incidentsArray = new JsonArray(incidents.stream().map(this::toJsonObject).collect(Collectors.toList()));
+        JsonObject jsonObject = new JsonObject().put("incidents", incidentsArray);
+        msg.reply(jsonObject);
+    }
+
+    private void incidentById(Message<JsonObject> msg) {
+        String id = msg.body().getString("incidentId");
+        Incident incident = service.getIncident(id);
+        if (incident == null) {
+            msg.reply(new JsonObject());
+        } else {
+            msg.reply(new JsonObject().put("incident", toJsonObject(incident)));
+        }
+    }
+
+    private void incidentsByStatus(Message<JsonObject> msg) {
+        String status = msg.body().getString("status");
+        List<Incident> incidents = service.incidentsByStatus(status);
+        JsonArray incidentsArray = new JsonArray(incidents.stream().map(this::toJsonObject).collect(Collectors.toList()));
+        JsonObject jsonObject = new JsonObject().put("incidents", incidentsArray);
+        msg.reply(jsonObject);
+    }
+
+    private void incidentsByName(Message<JsonObject> msg) {
+        String name = msg.body().getString("name");
+        List<Incident> incidents = service.incidentsByName(name);
+        JsonArray incidentsArray = new JsonArray(incidents.stream().map(this::toJsonObject).collect(Collectors.toList()));
+        JsonObject jsonObject = new JsonObject().put("incidents", incidentsArray);
+        msg.reply(jsonObject);
+    }
+
+    private void reset(Message<JsonObject> msg) {
+        service.reset();
+        msg.reply(new JsonObject());
+    }
+
+    private void createIncident(Message<JsonObject> msg) {
+        Incident created = service.create(fromJsonObject(msg.body()));
+        msg.reply(new JsonObject());
+    }
+
+    private JsonObject toJsonObject(Incident incident) {
+        return new JsonObject().put("id", incident.getId())
+                .put("lat", incident.getLat())
+                .put("lon", incident.getLon())
+                .put("medicalNeeded", incident.isMedicalNeeded())
+                .put("numberOfPeople", incident.getNumberOfPeople())
+                .put("victimName", incident.getVictimName())
+                .put("victimPhoneNumber", incident.getVictimPhoneNumber())
+                .put("timeStamp", incident.getTimestamp())
+                .put("status", incident.getStatus());
+    }
+
+    private Incident fromJsonObject(JsonObject jsonObject) {
+        return new Incident.Builder(jsonObject.getString("id"))
+                .lat(jsonObject.getDouble("lat").toString())
+                .lon(jsonObject.getDouble("lon").toString())
+                .medicalNeeded(jsonObject.getBoolean("medicalNeeded"))
+                .numberOfPeople(jsonObject.getInteger("numberOfPeople"))
+                .victimName(jsonObject.getString("victimName"))
+                .victimPhoneNumber(jsonObject.getString("victimPhoneNumber"))
+                .timestamp(jsonObject.getLong("timeStamp"))
+                .status(jsonObject.getString("status"))
+                .build();
+    }
+}
+----
++
+** The `@ConsumeEvent` annotation marks a method as a consumer of messages from the Vert.x EventBus. The `value` attribute specifies the EventBus destination. The `blocking` attribute specifies that the event consumption should be done on a Vert.x worker thread, rather than on an event loop thread.
+
+==== Producing Kafka messages
+
+Quarkus applications utilize MicroProfile Reactive Messaging to interact with Apache Kafka.
+
+The Incident Service needs to send a message to a Kafka topic when a new Incident is created. In the Spring Boot implementation, this is done as part of the `create` method in the `IncidentService` class. In the Quarkus version of the service, you are going to add this functionality to the `EventBusConsumer` class.
+
+. To integrate with Kafka, the following quarkus extensions need to be added to the `pom.xml` file: `quarkus-smallrye-reactive-streams-operators`, `quarkus-smallrye-reactive-messaging`, `quarkus-smallrye-reactive-mesaging-kafka`.
++
+----
+  <dependencies>
+    [...]
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-smallrye-reactive-streams-operators</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-smallrye-reactive-messaging</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-smallrye-reactive-messaging-kafka</artifactId>
+    </dependency>
+  </dependencies>
+----
+
+. Add the following field to the `EventBusConsumer` class:
++
+----
+private FlowableProcessor<Incident> processor = UnicastProcessor.<Incident>create().toSerialized();
+----
++
+`UnicastProcessor` is a _reactivex_ Processor that queues up events until a single _Subscriber_ subscribes to it, replays those events to it until the Subscriber catches up and then switches to relaying events live to this single Subscriber. The call to `toSerialized()` ensures that calls to `onNext()` are properly serialized.
+
+. Add the following methods to the `EventConsumer` class:
++
+----
+    @Outgoing("incident-reported-event")
+    public PublisherBuilder<org.eclipse.microprofile.reactive.messaging.Message<String>> source() {
+        return ReactiveStreams.fromPublisher(processor).flatMapCompletionStage(this::toMessage);
+    }
+
+    private CompletionStage<org.eclipse.microprofile.reactive.messaging.Message<String>> toMessage(Incident incident) {
+        com.redhat.cajun.navy.incident.message.Message<IncidentReportedEvent> message
+                = new com.redhat.cajun.navy.incident.message.Message.Builder<>("IncidentReportedEvent", "IncidentService",
+                    new IncidentReportedEvent.Builder(incident.getId())
+                        .lat(new BigDecimal(incident.getLat()))
+                        .lon(new BigDecimal(incident.getLon()))
+                        .medicalNeeded(incident.isMedicalNeeded())
+                        .numberOfPeople(incident.getNumberOfPeople())
+                        .timestamp(incident.getTimestamp())
+                        .build())
+                .build();
+        Jsonb jsonb = JsonbBuilder.create();
+        String json = jsonb.toJson(message);
+        log.debug("Message: " + json);
+        CompletableFuture<org.eclipse.microprofile.reactive.messaging.Message<String>> future = new CompletableFuture<>();
+        KafkaMessage<String, String> kafkaMessage = KafkaMessage.of(incident.getId(), json);
+        future.complete(kafkaMessage);
+        return future;
+    }
+----
++
+** The `org.eclipse.microprofile.reactive.messaging.Outgoing` annotation is used to signify a publisher of outgoing messages.
+** The publisher method can take several signatures. Here we use a method that takes zero parameters, and returns a `PublisherBuilder`. `PublisherBuilder` is a builder for a _reactivestreams_ `Publisher`
+** The type of message is wrapped in a `org.eclipse.microprofile.reactive.messaging.Message`.
+** The `toMessage` method implementation constructs a `KafkaMessage` (which is a subclass of `org.eclipse.microprofile.reactive.messaging.Message`) with JSON payload and the Incident id as key. The message is wrapped in a `CompletableFuture` which itself is used to build the `PublisherBuilder`.
+** The result is that whenever the `BehaviorProcessor` observes an item, a Kafka message will be sent. The details of the Kafka connection and the target topic are specified in the configuration.
+
+. When a new Incident has been created, it must be submitted to the `BehaviorProcessor`. This is done in the `create` method of the `EventBusConsumer` class:
++
+----
+    private void createIncident(Message<JsonObject> msg) {
+        Incident created = service.create(codec.fromJsonObject(msg.body()));
+	    processor.onNext(created);
+        msg.reply(new JsonObject());
+    }
+----
+** The `onNext()` method is back-pressure aware: if the subscriber is not ready to accept events, they will be buffrered in the processor .
+
+==== Consuming Kafka messages
+
+The Incident Service listens for _UpdateIncidentCommand_ messages published on a Kafka queue. On Quarkus, MicroProfile Reactive Messaging is used to consume messages from Kafka.
+
+. In the project, create a new package `com.redhat.cajun.navy.incident.consumer`.
+. In the `pom.xml` of the project, add a depenency to the `quarkus-jsonp` extension:
++
+----
+  <dependencies>
+    [...]
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-jsonp</artifactId>
+    </dependency>
+  </dependencies>
+----
+** _JSON-P_ (JSON Processing) is a Java API to process and parse JSON messages.
+. In the `com.redhat.cajun.navy.incident.consumer` package, create a class `IncidentCommandMessageSource` with the following implementation:
++
+----
+@ApplicationScoped
+public class IncidentCommandMessageSource {
+
+    private final static Logger log = LoggerFactory.getLogger(IncidentCommandMessageSource.class);
+
+    private static final String UPDATE_INCIDENT_COMMAND = "UpdateIncidentCommand";
+    private static final String[] ACCEPTED_MESSAGE_TYPES = {UPDATE_INCIDENT_COMMAND};
+
+    @Inject
+    IncidentService incidentService;
+
+    @Incoming("incident-command")
+    @Acknowledgment(Acknowledgment.Strategy.MANUAL)
+    public CompletionStage<ReceivedKafkaMessage<String, String>> processMessage(ReceivedKafkaMessage<String, String> message) {
+        try {
+            acceptMessageType(message.getPayload()).ifPresent(m -> processUpdateIncidentCommand(message.getPayload()));
+        } catch (Exception e) {
+            log.error("Error processing msg " + message.getPayload(), e);
+        }
+        return message.ack().toCompletableFuture().thenApply(x -> message);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void processUpdateIncidentCommand(String messageAsJson) {
+
+        Message<UpdateIncidentCommand> message;
+
+        JsonbConfig config = new JsonbConfig().withAdapters(new UpdateIncidentCommandMessageAdapter());
+        Jsonb jsonb = JsonbBuilder.newBuilder().withConfig(config).build();
+        message = jsonb.fromJson(messageAsJson, Message.class);
+        Incident incident = message.getBody().getIncident();
+
+        log.debug("Processing '" + UPDATE_INCIDENT_COMMAND + "' message for incident '" + incident.getId() + "'");
+        incidentService.updateIncident(incident);
+    }
+
+    private Optional<String> acceptMessageType(String messageAsJson) {
+        try {
+            JsonObject jsonReader = Json.createReader(new StringReader(messageAsJson)).readObject();
+            String messageType = jsonReader.getString("messageType");
+            if (Arrays.asList(ACCEPTED_MESSAGE_TYPES).contains(messageType)) {
+                return Optional.of(messageType);
+            }
+            log.debug("Message with type '" + messageType + "' is ignored");
+        } catch (Exception e) {
+            log.warn("Unexpected message which is not JSON or without 'messageType' field.");
+            log.warn("Message: " + messageAsJson);
+        }
+        return Optional.empty();
+    }
+
+}
+----
+** The implementation is fairly similar to the `UpdateIncidentCommandListener` class in the Spring Boot application. The differences reside in the way the String payload is unmarshalled ( with _JSON-B_ instead of _Jackson_), and of course how a stream of incoming messages is defined when using Reactive Messaging.
+** The `@Incoming` annotation defines a subscriber to incoming messages. The details of the message source - Kafka in our case - are specified as configuration.
+** The `@Acknowledgment(Acknowledgment.Strategy.MANUAL)` annotation indicates that incoming messages ae acknowledged manually. Translated to Kafka this means that _autocommit_ is set to false, and messages are committed explicitly.
+** The implementation checks whether the incoming message is of the expected format, and if so, unmarshals the payload to an `Incident` instance and delegates to the `IncidentService` to update the Incident entity in the database. Finally the message is acknowledged.
+
+==== Health Check
+
+Quarkus uses the MicroProfile Health specification through the SmallRye Health extension. +
+MicroProfile Health allows applications to provide information about their state to external viewers which is typically useful in cloud environments where automated processes must be able to determine whether the application should be discarded or restarted.
+
+. In the `pom.xml` file of the project, add a dependency to the `quarkus-smallrye-health` extension:
++
+----
+  <dependencies>
+    [...]
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-smallrye-health</artifactId>
+    </dependency>
+  </dependencies>
+----
+. In the `com.redhat.cajun.navy.incident.rest` pckage of the project, add a class `ApplicationHealthCheck` with the following contents:
++
+----
+@Health
+@ApplicationScoped
+public class ApplicationHealthCheck implements HealthCheck {
+
+    @Override
+    public HealthCheckResponse call() {
+        return HealthCheckResponse.named("Health check").up().build();
+    }
+}
+----
+** The healthcheck is exposed as a REST endpoint, with path `/health`
+
+
+==== Configuration
+
+Configuration of Quarkus applications is through the MicroProfile Config specification. A Quarkus application expects configuration settings in a `application.properties` properties file on the classpath. Externalized configuration settings can be provided through system properties at application startup, through environment variables of by providing a properties file in the `config` directory, relative to the application.
+
+. Create a file `application.properties` in the `src/main/resurces` directory of the project.
+. Add the following configuration properties to the file:
++
+----
+quarkus.datasource.driver=org.postgresql.Driver
+quarkus.hibernate-orm.database.generation=none
+
+quarkus.log.category."com.redhat.cajun.navy".level=DEBUG
+quarkus.log.category."org.eclipse.yasson".level=ERROR
+quarkus.log.console.enable=true
+quarkus.log.console.level=DEBUG
+quarkus.log.level=INFO
+
+# Configure the Kafka source
+smallrye.messaging.source.incident-command.type=io.smallrye.reactive.messaging.kafka.Kafka
+smallrye.messaging.source.incident-command.key.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+smallrye.messaging.source.incident-command.value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+smallrye.messaging.source.incident-command.request.timeout.ms=30000
+smallrye.messaging.source.incident-command.enable.auto.commit=false
+
+# Configure the Kafka sink
+smallrye.messaging.sink.incident-reported-event.type=io.smallrye.reactive.messaging.kafka.Kafka
+smallrye.messaging.sink.incident-reported-event.key.serializer=org.apache.kafka.common.serialization.StringSerializer
+smallrye.messaging.sink.incident-reported-event.value.serializer=org.apache.kafka.common.serialization.StringSerializer
+smallrye.messaging.sink.incident-reported-event.session.timeout.ms=6000
+smallrye.messaging.sink.incident-reported-event.acks=1
+----
++
+** Additional configuration properties which are environment specific (database connection URL, Kafka connection details, etc..) should be provided with an external properties file, mounted as a ConfigMap in the application container.
+** The `smallrye.messaging.source.incident-command` and `smallrye.messaging.sink.incident-reported-event` entries provide configuration settings for the incoming (source) and outgoing (sink) Kafka message streams.
+
+==== Building a native image
+
+. Verify that the application code compiles and builds successfully.
++
+----
+$ mvn clean package
+----
+. Build a Linux 64-bit native executable of the application:
++
+----
+$ mvn package -Pnative -Dnative-image.docker-build=true
+----
++
+** This produces a native executable `incident-service-quarkus-0.0.1-SNAPSHOT-runner` in the `target` folder of the project. Note that this executable only runs on 64-bit Linux.
+. Build a Docker image with the native executable. The `src/main/docker` folder of the project contains a Dockerfile based on a minimal Fedora image. Build the Docker image:
++
+----
+$ sudo docker build -f src/main/docker/Dockerfile.native -t incident-service-quarkus:0.0.1
+----
+
+==== Deploying on OpenShift
+
+. Push the Docker image to the internal registry of your OpenShift cluster. This requires admin access to the cluster. The steps are as follows - adapt where needed:
++
+----
+$ sudo docker login -p <token> -e unused -u unused docker-registry-default.apps.<openshift-domain>
+$ sudo docker tag incident-service-quarkus:0.0.1 docker-registry-default.apps.<openshift-domain>/openshift/incident-service-quarkus:0.0.1
+$ sudo docker push docker-registry-default.apps.<openshift-domain/openshift/incident-service-quarkus:0.0.1
+----
+
+. Create a file called `application.properties` on your local file system, with the following content:
++
+----
+quarkus.datasource.url=jdbc:postgresql://postgresql.emergency-response-demo.svc:5432/emergency_response_demo
+quarkus.datasource.username=naps
+quarkus.datasource.password=naps
+
+smallrye.messaging.sink.incident-reported-event.bootstrap.servers=kafka-cluster-kafka-bootstrap.emergency-response-demo.svc:9092
+smallrye.messaging.sink.incident-reported-event.topic=topic-incident-event
+
+smallrye.messaging.source.incident-command.bootstrap.servers=kafka-cluster-kafka-bootstrap.emergency-response-demo.svc:9092
+smallrye.messaging.source.incident-command.topic=topic-incident-command
+smallrye.messaging.source.incident-command.group.id=incident-service-quarkus
+----
+
+. Using the OpenShift `oc` command line tool, create a ConfigMap for the Incident Service:
++
+----
+$ oc create configmap incident-service-quarkus --from-file=application.properties -n emergency-response-demo
+----
+
+. Using the OpenShift `oc` command line tool, create a DeploymentConfig, Service and Route for the Incident Service:
+
+. Create a file called `incident-service-quarkus` on your local file system, with the following content:
++
+----
+---
+kind: List
+apiVersion: v1
+items:
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      app: incident-service-quarkus
+      expose: "true"
+    annotations:
+    name: incident-service-quarkus
+  spec:
+    ports:
+      - name: http
+        port: 8080
+        protocol: TCP
+        targetPort: 8080
+    selector:
+      group: erd-services
+      app: incident-service-quarkus
+    sessionAffinity: None
+    type: ClusterIP
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    labels:
+      app: incident-service-quarkus
+    name: incident-service-quarkus
+  spec:
+    port:
+      targetPort: 8080
+    to:
+      kind: Service
+      name: incident-service-quarkus
+      weight: 100
+    wildcardPolicy: None
+- apiVersion: apps.openshift.io/v1
+  kind: DeploymentConfig
+  metadata:
+    labels:
+      app: incident-service-quarkus
+    name: incident-service-quarkus
+  spec:
+    replicas: 1
+    revisionHistoryLimit: 2
+    selector:
+      group: erd-services
+      app: incident-service-quarkus
+    strategy:
+      activeDeadlineSeconds: 21600
+      resources: {}
+      rollingParams:
+        intervalSeconds: 1
+        maxSurge: 25%
+        maxUnavailable: 25%
+        timeoutSeconds: 3600
+        updatePeriodSeconds: 1
+      type: Rolling
+    template:
+      metadata:
+        labels:
+          group: erd-services
+          app: incident-service-quarkus
+      spec:
+        containers:
+          - env:
+            - name: KUBERNETES_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            imagePullPolicy: IfNotPresent
+            name: incident-service-quarkus
+            ports:
+              - containerPort: 8080
+                name: http
+                protocol: TCP
+              - containerPort: 9779
+                name: prometheus
+                protocol: TCP
+              - containerPort: 8778
+                name: jolokia
+                protocol: TCP
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: 8080
+                scheme: HTTP
+              initialDelaySeconds: 10
+              periodSeconds: 30
+              timeoutSeconds: 3
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: 8080
+                scheme: HTTP
+              initialDelaySeconds: 3
+              periodSeconds: 10
+              timeoutSeconds: 3
+            resources:
+              limits:
+                cpu: '100m'
+                memory: '150Mi'
+              requests:
+                cpu: '50m'
+                memory: '50Mi'
+            securityContext:
+              privileged: false
+            terminationMessagePath: /dev/termination-log
+            terminationMessagePolicy: File
+            volumeMounts:
+              - mountPath: /work/config
+                name: config
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        serviceAccount: incident-service-quarkus
+        serviceAccountName: incident-service-quarkus
+        terminationGracePeriodSeconds: 30
+        volumes:
+          - configMap:
+              defaultMode: 420
+              name: incident-service-quarkus
+            name: config
+    triggers:
+      - type: ConfigChange
+      - imageChangeParams:
+          automatic: true
+          containerNames:
+            - incident-service-quarkus
+          from:
+            kind: ImageStreamTag
+            name: "incident-service-quarkus:0.0.1"
+            namespace: openshift
+        type: ImageChange
+----
+
+==== Testing the Quarkus implementation of the Incident Service
+
+. Verify the logs of the `incident-service-quarkus` pod.
+. Change the url of the Incident Service to point to the Quarkus version in the `disaster-simulator` and `emergency-console` ConfigMaps.
+. Bounce the `disaster-simulator` and `emergency-console` pods.
+. Scale down the Spring Boot version of the Incident Service to 0 pods.
+. Run a test, verify the correct working of the Incident Service.
