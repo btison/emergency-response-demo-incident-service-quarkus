@@ -61,7 +61,7 @@ Quarkus promotes an asynchronous, reactive style of architecture and programming
 * JDK 1.8
 * Maven version >= 3.5.4
 * Docker installed and running.
-* Graal VM 1.0.0.rc16. The GRAALVM_HOME environment variable set to point to the Graal VM.
+* Graal VM 19.0.2. The GRAALVM_HOME environment variable set to point to the Graal VM.
 * A working C developer environment. On Linux this means GCC, the glibc and zlib headers. On MacOS run `xcode-select --install`.
 +
 NOTE: GraalVM and a C developer environment are not required if building the native executable in a Docker container.
@@ -74,7 +74,7 @@ NOTE: GraalVM and a C developer environment are not required if building the nat
 ----
 $ mkdir incident-service-quarkus
 $ cd incident-service-quarkus
-$ mvn io.quarkus:quarkus-maven-plugin:0.16.0:create \
+$ mvn io.quarkus:quarkus-maven-plugin:0.18.0:create \
     -DprojectGroupId=com.redhat.cajun.navy \
     -DprojectArtifactId=incident-service-quarkus \
     -DprojectVersionId=0.0.1-SNAPSHOT \
@@ -623,7 +623,7 @@ public class ApplicationHealthCheck implements HealthCheck {
 
 Configuration of Quarkus applications is through the MicroProfile Config specification. A Quarkus application expects configuration settings in a `application.properties` properties file on the classpath. Externalized configuration settings can be provided through system properties at application startup, through environment variables of by providing a properties file in the `config` directory, relative to the application.
 
-. Create a file `application.properties` in the `src/main/resurces` directory of the project.
+. Create a file `application.properties` in the `src/main/resources` directory of the project.
 . Add the following configuration properties to the file:
 +
 ----
@@ -637,22 +637,22 @@ quarkus.log.console.level=DEBUG
 quarkus.log.level=INFO
 
 # Configure the Kafka source
-smallrye.messaging.source.incident-command.type=io.smallrye.reactive.messaging.kafka.Kafka
-smallrye.messaging.source.incident-command.key.deserializer=org.apache.kafka.common.serialization.StringDeserializer
-smallrye.messaging.source.incident-command.value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
-smallrye.messaging.source.incident-command.request.timeout.ms=30000
-smallrye.messaging.source.incident-command.enable.auto.commit=false
+mp.messaging.incoming.incident-command.connector=smallrye-kafka
+mp.messaging.incoming.incident-command.key.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+mp.messaging.incoming.incident-command.value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+mp.messaging.incoming.incident-command.request.timeout.ms=30000
+mp.messaging.incoming.incident-command.enable.auto.commit=false
 
 # Configure the Kafka sink
-smallrye.messaging.sink.incident-reported-event.type=io.smallrye.reactive.messaging.kafka.Kafka
-smallrye.messaging.sink.incident-reported-event.key.serializer=org.apache.kafka.common.serialization.StringSerializer
-smallrye.messaging.sink.incident-reported-event.value.serializer=org.apache.kafka.common.serialization.StringSerializer
-smallrye.messaging.sink.incident-reported-event.session.timeout.ms=6000
-smallrye.messaging.sink.incident-reported-event.acks=1
+mp.messaging.outgoing.incident-reported-event.connector=smallrye-kafka
+mp.messaging.outgoing.incident-reported-event.key.serializer=org.apache.kafka.common.serialization.StringSerializer
+mp.messaging.outgoing.incident-reported-event.value.serializer=org.apache.kafka.common.serialization.StringSerializer
+mp.messaging.outgoing.incident-reported-event.session.timeout.ms=6000
+mp.messaging.outgoing.incident-reported-event.acks=1
 ----
 +
 ** Additional configuration properties which are environment specific (database connection URL, Kafka connection details, etc..) should be provided with an external properties file, mounted as a ConfigMap in the application container.
-** The `smallrye.messaging.source.incident-command` and `smallrye.messaging.sink.incident-reported-event` entries provide configuration settings for the incoming (source) and outgoing (sink) Kafka message streams.
+** The `mp.messaging.incoming.incident-command` and `mp.messaging.outgoing.incident-reported-event` entries provide configuration settings for the incoming (source) and outgoing (sink) Kafka message streams.
 
 ==== Building a native image
 
@@ -668,7 +668,7 @@ $ mvn package -Pnative -Dnative-image.docker-build=true
 ----
 +
 ** This produces a native executable `incident-service-quarkus-0.0.1-SNAPSHOT-runner` in the `target` folder of the project. Note that this executable only runs on 64-bit Linux.
-. Build a Docker image with the native executable. The `src/main/docker` folder of the project contains a Dockerfile based on a minimal Fedora image. Build the Docker image:
+. Build a Docker image with the native executable. The `src/main/docker` folder of the project contains a Dockerfile based on a minimal RHEL8 UBI image. Build the Docker image:
 +
 ----
 $ sudo docker build -f src/main/docker/Dockerfile.native -t incident-service-quarkus:0.0.1
@@ -691,12 +691,12 @@ quarkus.datasource.url=jdbc:postgresql://postgresql.emergency-response-demo.svc:
 quarkus.datasource.username=naps
 quarkus.datasource.password=naps
 
-smallrye.messaging.sink.incident-reported-event.bootstrap.servers=kafka-cluster-kafka-bootstrap.emergency-response-demo.svc:9092
-smallrye.messaging.sink.incident-reported-event.topic=topic-incident-event
+mp.messaging.outgoing.incident-reported-event.bootstrap.servers=kafka-cluster-kafka-bootstrap.emergency-response-demo.svc:9092
+mp.messaging.outgoing.incident-reported-event.topic=topic-incident-event
 
-smallrye.messaging.source.incident-command.bootstrap.servers=kafka-cluster-kafka-bootstrap.emergency-response-demo.svc:9092
-smallrye.messaging.source.incident-command.topic=topic-incident-command
-smallrye.messaging.source.incident-command.group.id=incident-service-quarkus
+mp.messaging.incoming.incident-command.bootstrap.servers=kafka-cluster-kafka-bootstrap.emergency-response-demo.svc:9092
+mp.messaging.incoming.incident-command.topic=topic-incident-command
+mp.messaging.incoming.incident-command.group.id=incident-service-quarkus
 ----
 
 . Using the OpenShift `oc` command line tool, create a ConfigMap for the Incident Service:
