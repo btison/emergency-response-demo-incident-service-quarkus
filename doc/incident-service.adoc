@@ -61,7 +61,7 @@ Quarkus promotes an asynchronous, reactive style of architecture and programming
 * JDK 1.8
 * Maven version >= 3.5.4
 * Docker installed and running.
-* Graal VM 19.0.2. The GRAALVM_HOME environment variable set to point to the Graal VM.
+* Graal VM 19.1.1. The GRAALVM_HOME environment variable set to point to the Graal VM.
 * A working C developer environment. On Linux this means GCC, the glibc and zlib headers. On MacOS run `xcode-select --install`.
 +
 NOTE: GraalVM and a C developer environment are not required if building the native executable in a Docker container.
@@ -74,7 +74,7 @@ NOTE: GraalVM and a C developer environment are not required if building the nat
 ----
 $ mkdir incident-service-quarkus
 $ cd incident-service-quarkus
-$ mvn io.quarkus:quarkus-maven-plugin:0.18.0:create \
+$ mvn io.quarkus:quarkus-maven-plugin:0.20.0:create \
     -DprojectGroupId=com.redhat.cajun.navy \
     -DprojectArtifactId=incident-service-quarkus \
     -DprojectVersionId=0.0.1-SNAPSHOT \
