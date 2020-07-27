@@ -19,6 +19,7 @@
     <surefire-plugin.version>3.0.0-M5</surefire-plugin.version>
     <smallrye.version>2.0.4</smallrye.version>
     <json-unit.version>2.18.0</json-unit.version>
+    <opentracing-kafka-client.version>0.1.13</opentracing-kafka-client.version>
   </properties>
   <dependencyManagement>
     <dependencies>
@@ -71,6 +72,15 @@
     <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-smallrye-metrics</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-smallrye-opentracing</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.opentracing.contrib</groupId>
+      <artifactId>opentracing-kafka-client</artifactId>
+      <version>${opentracing-kafka-client.version}</version>
     </dependency>
     <dependency>
       <groupId>io.quarkus</groupId>

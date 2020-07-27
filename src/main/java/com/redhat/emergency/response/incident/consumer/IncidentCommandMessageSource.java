@@ -11,12 +11,16 @@ import javax.inject.Inject;
 import com.redhat.emergency.response.incident.message.IncidentEvent;
 import com.redhat.emergency.response.incident.message.Message;
 import com.redhat.emergency.response.incident.service.IncidentService;
+import com.redhat.emergency.response.incident.tracing.TracingKafkaUtils;
+import io.opentracing.Span;
+import io.opentracing.Tracer;
 import io.smallrye.mutiny.Multi;
 import io.smallrye.mutiny.operators.multi.processors.UnicastProcessor;
 import io.smallrye.reactive.messaging.kafka.IncomingKafkaRecord;
 import io.smallrye.reactive.messaging.kafka.KafkaRecord;
 import io.vertx.core.json.Json;
 import io.vertx.core.json.JsonObject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.reactive.messaging.Acknowledgment;
 import org.eclipse.microprofile.reactive.messaging.Incoming;
 import org.eclipse.microprofile.reactive.messaging.Outgoing;
@@ -33,18 +37,26 @@ public class IncidentCommandMessageSource {
 
     private final UnicastProcessor<JsonObject> processor = UnicastProcessor.create();
 
+    @ConfigProperty(name = "mp.messaging.outgoing.incident-event.topic")
+    String incidentEventTopic;
+
     @Inject
     IncidentService incidentService;
+
+    @Inject
+    Tracer tracer;
 
     @Incoming("incident-command")
     @Acknowledgment(Acknowledgment.Strategy.MANUAL)
     public CompletionStage<CompletionStage<Void>> processMessage(IncomingKafkaRecord<String, String> message) {
-
         return CompletableFuture.supplyAsync(() -> {
+            Span span = TracingKafkaUtils.buildChildSpan("IncidentCommand", message, tracer);
             try {
                 acceptMessageType(message.getPayload()).ifPresent(this::processUpdateIncidentCommand);
             } catch (Exception e) {
                 log.error("Error processing msg " + message.getPayload(), e);
+            } finally {
+                span.finish();
             }
             return message.ack();
         });
@@ -95,7 +107,9 @@ public class IncidentCommandMessageSource {
                 .build();
         String json = Json.encode(message);
         log.debug("Message: " + json);
-        return KafkaRecord.of(incident.getString("id"), json);
+        KafkaRecord<String, String> record = KafkaRecord.of(incidentEventTopic, incident.getString("id"), json);
+        TracingKafkaUtils.buildAndInjectSpan(record, tracer);
+        return record;
     }
 
 }

@@ -5,6 +5,10 @@ import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 
 import com.redhat.emergency.response.incident.message.IncidentEvent;
+import com.redhat.emergency.response.incident.tracing.TracingKafkaUtils;
+import com.redhat.emergency.response.incident.tracing.TracingUtils;
+import io.opentracing.Span;
+import io.opentracing.Tracer;
 import io.quarkus.vertx.ConsumeEvent;
 import io.smallrye.mutiny.Multi;
 import io.smallrye.mutiny.operators.multi.processors.UnicastProcessor;
@@ -13,6 +17,7 @@ import io.vertx.core.json.Json;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import io.vertx.mutiny.core.eventbus.Message;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.reactive.messaging.Outgoing;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,32 +30,43 @@ public class EventBusConsumer {
     @Inject
     IncidentService service;
 
+    @Inject
+    Tracer tracer;
+
+    @ConfigProperty(name = "mp.messaging.outgoing.incident-event-1.topic")
+    String incidentEventTopic;
+
     private final UnicastProcessor<JsonObject> processor = UnicastProcessor.create();
 
     @ConsumeEvent(value = "incident-service", blocking = true)
     public void consume(Message<JsonObject> msg) {
         String action = msg.headers().get("action");
-        switch (action) {
-            case "incidents" :
-                incidents(msg);
-                break;
-            case "incidentById" :
-                incidentById(msg);
-                break;
-            case "incidentsByStatus":
-                incidentsByStatus(msg);
-                break;
-            case "incidentsByName":
-                incidentsByName(msg);
-                break;
-            case "reset" :
-                reset(msg);
-                break;
-            case "createIncident":
-                createIncident(msg);
-                break;
-            default:
-                msg.fail(-1, "Unsupported operation");
+        Span span = TracingUtils.activateSpan(action, msg, tracer);
+        try {
+            switch (action) {
+                case "incidents":
+                    incidents(msg);
+                    break;
+                case "incidentById":
+                    incidentById(msg);
+                    break;
+                case "incidentsByStatus":
+                    incidentsByStatus(msg);
+                    break;
+                case "incidentsByName":
+                    incidentsByName(msg);
+                    break;
+                case "reset":
+                    reset(msg);
+                    break;
+                case "createIncident":
+                    createIncident(msg);
+                    break;
+                default:
+                    msg.fail(-1, "Unsupported operation");
+            }
+        } finally {
+            span.finish();
         }
     }
 
@@ -92,6 +108,9 @@ public class EventBusConsumer {
         JsonObject created = service.create(msg.body());
         processor.onNext(created);
         msg.replyAndForget(new JsonObject());
+        if (tracer.activeSpan() != null) {
+            tracer.activeSpan().setTag("incidentId", created.getString("id"));
+        }
     }
 
     @Outgoing("incident-event-1")
@@ -115,7 +134,8 @@ public class EventBusConsumer {
                 .build();
         String json = Json.encode(message);
         log.debug("Message: " + json);
-        return KafkaRecord.of(incident.getString("id"), json);
-
+        KafkaRecord<String, String> record = KafkaRecord.of(incidentEventTopic, incident.getString("id"), json);
+        TracingKafkaUtils.buildAndInjectSpan(record, tracer);
+        return record;
     }
 }
