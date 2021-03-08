@@ -1,0 +1,125 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "$id": "http://erdemo.io/IncidentUpdatedEvent-schema.json",
+  "type": "object",
+  "title": "IncidentUpdatedEvent",
+  "description": "Schema for IncidentUpdatedEvent message",
+  "default": {},
+  "examples": [
+    {
+      "id": "incident123",
+      "lat": 34.14338,
+      "lon": -77.86569,
+      "numberOfPeople": 3,
+      "medicalNeeded": true,
+      "timestamp": 1521148332350,
+      "victimName": "John Doe",
+      "victimPhoneNumber": "111-222-333",
+      "status": "REPORTED"
+    }
+  ],
+  "required": [
+    "id",
+    "lat",
+    "lon",
+    "numberOfPeople",
+    "medicalNeeded",
+    "timestamp",
+    "victimName",
+    "victimPhoneNumber",
+    "status"
+  ],
+  "properties": {
+    "id": {
+      "$id": "#/properties/id",
+      "type": "string",
+      "title": "The id schema",
+      "description": "The id of the incident.",
+      "default": "",
+      "examples": [
+        "incident123"
+      ]
+    },
+    "lat": {
+      "$id": "#/properties/lat",
+      "type": "number",
+      "title": "The lat schema",
+      "description": "The latitude part of the incident location coordinates.",
+      "default": 0.0,
+      "examples": [
+        34.14338
+      ]
+    },
+    "lon": {
+      "$id": "#/properties/lon",
+      "type": "number",
+      "title": "The lon schema",
+      "description": "The longitude part of the incident location coordinates.",
+      "default": 0.0,
+      "examples": [
+        -77.86569
+      ]
+    },
+    "numberOfPeople": {
+      "$id": "#/properties/numberOfPeople",
+      "type": "integer",
+      "title": "The numberOfPeople schema",
+      "description": "The number of evacuees.",
+      "default": 0,
+      "examples": [
+        3
+      ]
+    },
+    "medicalNeeded": {
+      "$id": "#/properties/medicalNeeded",
+      "type": "boolean",
+      "title": "The medicalNeeded schema",
+      "description": "Whether medical assistance is required for this incident.",
+      "default": false,
+      "examples": [
+        true
+      ]
+    },
+    "timestamp": {
+      "$id": "#/properties/timestamp",
+      "type": "integer",
+      "title": "The timestamp schema",
+      "description": "Timestamp the incident has been reported.",
+      "default": 0,
+      "examples": [
+        1521148332350
+      ]
+    },
+    "victimName": {
+      "$id": "#/properties/victimName",
+      "type": "string",
+      "title": "The victimName schema",
+      "description": "The name of the incident reporter.",
+      "default": "",
+      "examples": [
+        "John Doe"
+      ]
+    },
+    "victimPhoneNumber": {
+      "$id": "#/properties/victimPhoneNumber",
+      "type": "string",
+      "title": "The victimPhoneNumber schema",
+      "description": "The phonenumber of the incident reporter.",
+      "default": "",
+      "examples": [
+        "111-222-333"
+      ]
+    },
+    "status": {
+      "$id": "#/properties/status",
+      "type": "string",
+      "title": "The status schema",
+      "description": "The status of the incident.",
+      "default": "REPORTED",
+      "examples": [
+        "REPORTED"
+      ]
+    }
+  },
+  "additionalProperties": true
+}
